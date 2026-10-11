@@ -6,90 +6,92 @@ import {
   addQueuedModelJob,
   finishQueuedModelJob,
   updateModelStatus,
-  type ModelPhase,
 } from './model-status';
 
-interface WorkerStatusMessage {
-  type: 'status';
-  requestId: string;
-  phase: ModelPhase;
-  message: string;
-  progress: number | null;
+interface OllamaEnrichment {
+  synopsis: string;
+  genres: string[];
+  cast: string[];
 }
-
-interface WorkerResultMessage {
-  type: 'result';
-  requestId: string;
-  movie: TMDBMovieDetails;
-}
-
-interface WorkerErrorMessage {
-  type: 'error';
-  requestId: string;
-  message: string;
-}
-
-type WorkerResponse = WorkerStatusMessage | WorkerResultMessage | WorkerErrorMessage;
 
 interface PendingJob {
+  movie: TMDBMovieDetails;
   resolve: (movie: TMDBMovieDetails) => void;
   reject: (error: Error) => void;
   onJobStarted?: () => void;
 }
 
-let worker: Worker | null = null;
-let nextRequestId = 0;
-const pendingJobs = new Map<string, PendingJob>();
+let queue = Promise.resolve();
 
-function rejectPendingJobs(message: string): void {
-  const jobs = [...pendingJobs.entries()];
-  pendingJobs.clear();
-  worker?.terminate();
-  worker = null;
-  jobs.forEach(([, job]) => {
-    finishQueuedModelJob(message);
-    job.reject(new Error(message));
-  });
+function validateEnrichment(value: unknown): value is OllamaEnrichment {
+  if (!value || typeof value !== 'object') return false;
+  const result = value as Record<string, unknown>;
+  return typeof result.synopsis === 'string'
+    && Array.isArray(result.genres)
+    && result.genres.every(item => typeof item === 'string')
+    && Array.isArray(result.cast)
+    && result.cast.every(item => typeof item === 'string');
 }
 
-function getWorker(): Worker {
-  if (worker) return worker;
-
-  const instance = new Worker('/movie-enrichment-worker.js', { type: 'module' });
-  instance.addEventListener('message', (event: MessageEvent<WorkerResponse>) => {
-    const response = event.data;
-    if (response.type === 'status') {
-      updateModelStatus({
-        phase: response.phase,
-        message: response.message,
-        progress: response.progress,
-      });
-      if (response.phase === 'enriching') pendingJobs.get(response.requestId)?.onJobStarted?.();
-      appLogger.info(`Local AI: ${response.message}`);
-      return;
-    }
-
-    const job = pendingJobs.get(response.requestId);
-    if (!job) return;
-    pendingJobs.delete(response.requestId);
-
-    if (response.type === 'result') {
-      finishQueuedModelJob();
-      job.resolve(response.movie);
-    } else {
-      finishQueuedModelJob(response.message);
-      appLogger.error('Local movie enrichment failed in the model worker.');
-      job.reject(new Error(`Local movie enrichment failed: ${response.message}`));
-    }
+async function enrichFromOllama(job: PendingJob): Promise<TMDBMovieDetails> {
+  const { movie } = job;
+  updateModelStatus({
+    phase: 'connecting',
+    message: 'Connecting to Ollama at http://127.0.0.1:11434…',
   });
-  instance.addEventListener('error', event => {
-    event.preventDefault();
-    const message = 'The local AI worker stopped unexpectedly. Try the movie lookup again.';
-    appLogger.error('The local AI worker stopped unexpectedly.');
-    rejectPendingJobs(message);
+  job.onJobStarted?.();
+  updateModelStatus({
+    phase: 'enriching',
+    message: 'Sending sourced movie facts to local Ollama…',
   });
-  worker = instance;
-  return instance;
+
+  let response: Response;
+  try {
+    response = await fetch('/api/local-ai/enrich', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        movie: {
+          title: movie.title,
+          year: movie.release_date.slice(0, 4),
+          synopsis: movie.overview,
+          genres: movie.genres.map(genre => genre.name),
+          cast: movie.credits.cast.slice(0, 50).map(member => member.name),
+        },
+      }),
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : 'Network request failed.';
+    throw new Error(`Could not reach the local Ollama endpoint: ${detail}`);
+  }
+
+  const result = await response.json() as { enrichment?: unknown; error?: string };
+  if (!response.ok) {
+    throw new Error(result.error || `Local Ollama request failed (${response.status}).`);
+  }
+  if (!validateEnrichment(result.enrichment)) {
+    throw new Error('Ollama returned an invalid structured response.');
+  }
+
+  const allowedGenres = new Set(movie.genres.map(genre => genre.name));
+  const allowedCast = new Set(movie.credits.cast.map(member => member.name));
+  const genres = result.enrichment.genres.filter(genre => allowedGenres.has(genre));
+  const cast = result.enrichment.cast.filter(name => allowedCast.has(name));
+  const sourceSynopsis = movie.overview.replace(/\s+/g, ' ');
+  const normalizedSynopsis = result.enrichment.synopsis.trim().replace(/\s+/g, ' ');
+  const synopsis = normalizedSynopsis && sourceSynopsis.includes(normalizedSynopsis)
+    ? normalizedSynopsis
+    : movie.overview;
+
+  return {
+    ...movie,
+    overview: synopsis,
+    genres: genres.length ? movie.genres.filter(genre => genres.includes(genre.name)) : movie.genres,
+    credits: {
+      ...movie.credits,
+      cast: cast.length ? movie.credits.cast.filter(member => cast.includes(member.name)) : movie.credits.cast,
+    },
+  };
 }
 
 export function enrichMovieLocally(
@@ -97,19 +99,24 @@ export function enrichMovieLocally(
   onQueued?: () => void,
   onJobStarted?: () => void
 ): Promise<TMDBMovieDetails> {
-  const requestId = `movie-enrichment-${++nextRequestId}`;
   addQueuedModelJob();
   onQueued?.();
 
-  return new Promise((resolve, reject) => {
-    pendingJobs.set(requestId, { resolve, reject, onJobStarted });
-    try {
-      getWorker().postMessage({ type: 'ENRICH_MOVIE', requestId, movie });
-    } catch (error) {
-      pendingJobs.delete(requestId);
-      const message = error instanceof Error ? error.message : 'Could not start the local AI worker.';
-      finishQueuedModelJob(message);
-      reject(new Error(`Local movie enrichment failed: ${message}`));
-    }
+  const result = new Promise<TMDBMovieDetails>((resolve, reject) => {
+    const job = { movie, resolve, reject, onJobStarted };
+    queue = queue.then(async () => {
+      try {
+        const enrichedMovie = await enrichFromOllama(job);
+        finishQueuedModelJob();
+        resolve(enrichedMovie);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Local Ollama enrichment failed.';
+        finishQueuedModelJob(message);
+        appLogger.error(`Local Ollama enrichment failed: ${message}`);
+        reject(new Error(message));
+      }
+    });
   });
+
+  return result;
 }

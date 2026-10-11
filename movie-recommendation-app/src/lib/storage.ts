@@ -1,8 +1,9 @@
 import type { User, WatchlistEntry, LikedElement, MovieScore, APIError, APISuccess, TMDBMovie, TMDBMovieDetails } from '../types/db';
 import type { UserFormula, FormulaEvolutionStep, ScoredMovie, MovieFeatures, FormulaParameters } from '../types/formula';
-import { extractMovieFeatures, computeMovieScore, initializeDefaultFormula, updateFormulaFromRating, evolveFormulaFromPatterns, adjustFormulaFromPrompt } from './formula';
+import { extractMovieFeatures, computeMovieScore, initializeDefaultFormula, updateFormulaFromRating, updateFormulaFromFavorite, evolveFormulaFromPatterns, adjustFormulaFromPrompt } from './formula';
 import type { FormulaComputationInput } from '../types/formula';
 import { appLogger } from './logger';
+import { GENRE_MAP } from './tmdb';
 
 /**
  * LocalStorage-based storage layer for local development
@@ -15,8 +16,16 @@ const STORAGE_KEYS = {
   FORMULA: 'movie_app_formula',
   SCORE_CACHE: 'movie_app_score_cache',
   EVOLUTION_HISTORY: 'movie_app_evolution_history',
-  SETTINGS: 'movie_app_settings'
+  SETTINGS: 'movie_app_settings',
+  RECOMMENDATION_HISTORY: 'movie_app_recommendation_history',
 } as const;
+
+export interface RecommendationHistoryEntry {
+  tmdb_id: number;
+  title: string;
+  shown_at: string;
+  favorite: boolean;
+}
 
 // Utility functions
 function generateId(): string {
@@ -418,6 +427,71 @@ export class DBService {
   static saveScoreCache(scores: ScoredMovie[]): void {
     const userId = this.getUserId();
     localStore.set(`${STORAGE_KEYS.SCORE_CACHE}_${userId}`, scores);
+  }
+
+  static getRecommendationHistory(): RecommendationHistoryEntry[] {
+    const userId = this.getUserId();
+    return localStore.get<RecommendationHistoryEntry[]>(
+      `${STORAGE_KEYS.RECOMMENDATION_HISTORY}_${userId}`
+    ) || [];
+  }
+
+  static recordShownRecommendations(movies: ScoredMovie[]): void {
+    const userId = this.getUserId();
+    const history = this.getRecommendationHistory();
+    const entries = new Map(history.map(entry => [entry.tmdb_id, entry]));
+    movies.forEach(movie => {
+      const existing = entries.get(movie.tmdb_id);
+      entries.set(movie.tmdb_id, {
+        tmdb_id: movie.tmdb_id,
+        title: movie.title,
+        shown_at: existing?.shown_at || new Date().toISOString(),
+        favorite: existing?.favorite || false,
+      });
+    });
+    localStore.set(
+      `${STORAGE_KEYS.RECOMMENDATION_HISTORY}_${userId}`,
+      [...entries.values()].slice(-1000)
+    );
+  }
+
+  static favoriteRecommendation(movie: ScoredMovie): boolean {
+    const history = this.getRecommendationHistory();
+    const existing = history.find(entry => entry.tmdb_id === movie.tmdb_id);
+    if (existing?.favorite) return false;
+
+    this.recordShownRecommendations([movie]);
+    const userId = this.getUserId();
+    const updatedHistory = this.getRecommendationHistory().map(entry => entry.tmdb_id === movie.tmdb_id
+      ? { ...entry, favorite: true }
+      : entry
+    );
+    localStore.set(`${STORAGE_KEYS.RECOMMENDATION_HISTORY}_${userId}`, updatedHistory);
+
+    const genreIds = movie.genres.flatMap(genre => {
+      const match = Object.entries(GENRE_MAP).find(([, name]) =>
+        name === genre.toLowerCase().replace(/[\s-]+/g, '_')
+      );
+      return match ? [Number(match[0])] : [];
+    });
+    const features = extractMovieFeatures({
+      id: movie.tmdb_id,
+      title: movie.title,
+      original_title: movie.title,
+      overview: movie.overview,
+      poster_path: movie.poster_path,
+      backdrop_path: movie.backdrop_path,
+      release_date: movie.release_date || '',
+      vote_average: movie.vote_average,
+      vote_count: movie.vote_count,
+      genre_ids: genreIds,
+      runtime: movie.runtime,
+      adult: false,
+      original_language: '',
+      popularity: 0,
+    });
+    this.saveFormula(updateFormulaFromFavorite(this.getFormula(), features));
+    return true;
   }
 
 }

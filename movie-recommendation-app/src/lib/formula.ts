@@ -242,6 +242,52 @@ export function updateFormulaFromRating(
   return evolvedFormula;
 }
 
+export function updateFormulaFromFavorite(
+  currentFormula: UserFormula,
+  movieFeatures: MovieFeatures
+): UserFormula {
+  const parameters = {
+    ...currentFormula.parameters,
+    keyword_weights: { ...currentFormula.parameters.keyword_weights },
+  };
+  const change = 0.12;
+
+  movieFeatures.genres.forEach(genre => {
+    const key = `genre_${genre}` as keyof FormulaParameters;
+    if (typeof parameters[key] === 'number') {
+      Object.assign(parameters, {
+        [key]: Math.min(2, parameters[key] + change),
+      });
+    }
+  });
+  movieFeatures.keywords.slice(0, 8).forEach(keyword => {
+    parameters.keyword_weights[keyword] = Math.min(
+      2,
+      (parameters.keyword_weights[keyword] || 0) + change / 2
+    );
+  });
+
+  const evolvedFormula: UserFormula = {
+    ...currentFormula,
+    parameters,
+    formula_text: generateFormulaLaTeX(parameters),
+    version: currentFormula.version + 1,
+    updated_at: new Date(),
+    evolution_history: [
+      ...(currentFormula.evolution_history || []),
+      {
+        timestamp: new Date(),
+        trigger: 'manual',
+        movie_tmdb_id: movieFeatures.tmdb_id,
+        changes: calculateParameterChanges(currentFormula.parameters, parameters),
+        description: `Taste profile updated after favoriting "${movieFeatures.title}"`,
+      },
+    ],
+  };
+
+  return evolvedFormula;
+}
+
 /**
  * Generate LaTeX representation of formula
  */
@@ -560,6 +606,7 @@ export default {
   extractMovieFeatures,
   computeMovieScore,
   updateFormulaFromRating,
+  updateFormulaFromFavorite,
   evolveFormulaFromPatterns,
   adjustFormulaFromPrompt,
   initializeDefaultFormula,

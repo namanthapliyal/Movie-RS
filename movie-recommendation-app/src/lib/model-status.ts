@@ -1,16 +1,14 @@
-export type ModelPhase = 'idle' | 'queued' | 'downloading' | 'loading' | 'ready' | 'enriching' | 'error';
+export type ModelPhase = 'idle' | 'queued' | 'connecting' | 'enriching' | 'error';
 
 export interface ModelStatus {
   phase: ModelPhase;
   message: string;
-  progress: number | null;
   queuedJobs: number;
 }
 
 const initialStatus: ModelStatus = {
   phase: 'idle',
   message: '',
-  progress: null,
   queuedJobs: 0,
 };
 
@@ -32,7 +30,7 @@ export function subscribeToModelStatus(listener: () => void): () => void {
 }
 
 export function updateModelStatus(
-  update: Omit<ModelStatus, 'queuedJobs'> & { queuedJobs?: number }
+  update: Partial<ModelStatus>
 ) {
   publish({ ...status, ...update, queuedJobs: update.queuedJobs ?? status.queuedJobs });
 }
@@ -43,9 +41,8 @@ export function addQueuedModelJob(): void {
     ...status,
     phase: status.phase === 'idle' || status.phase === 'error' ? 'queued' : status.phase,
     message: status.phase === 'idle' || status.phase === 'error'
-      ? 'Starting the local AI worker…'
+      ? 'Preparing a local Ollama request…'
       : status.message,
-    progress: status.phase === 'idle' || status.phase === 'error' ? null : status.progress,
     queuedJobs,
   });
 }
@@ -57,14 +54,18 @@ export function finishQueuedModelJob(errorMessage?: string): void {
       ...status,
       phase: 'error',
       message: errorMessage,
-      progress: null,
       queuedJobs,
     });
     return;
   }
 
   publish(queuedJobs > 0
-    ? { ...status, phase: 'queued', message: 'Waiting to enrich the next movie…', progress: null, queuedJobs }
+    ? {
+      ...status,
+      phase: 'queued',
+      message: 'Waiting for the next local Ollama request…',
+      queuedJobs,
+    }
     : initialStatus);
 }
 

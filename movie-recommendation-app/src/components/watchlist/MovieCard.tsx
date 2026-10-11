@@ -57,8 +57,8 @@ export default function MovieCard({ movie, onRemove, onWatch }: MovieCardProps) 
               <span className="min-w-0 break-words">
                 {movie.lookup_status === 'downloading' || movie.lookup_status === 'processing'
                   ? movie.lookup_status === 'processing'
-                    ? 'Enriching movie details locally…'
-                    : 'Waiting for local AI enrichment…'
+                    ? 'Enriching movie details with local Ollama…'
+                    : 'Waiting for local Ollama enrichment…'
                   : movie.lookup_message || 'Looking up movie details…'}
               </span>
             </div>

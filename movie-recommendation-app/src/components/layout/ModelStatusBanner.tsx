@@ -18,16 +18,12 @@ export default function ModelStatusBanner() {
 
   const busy = status.phase !== 'error';
   const label = status.phase === 'queued'
-    ? 'Local AI queued'
-    : status.phase === 'downloading'
-      ? 'Downloading local AI model'
-      : status.phase === 'loading'
-        ? 'Preparing local AI model'
-        : status.phase === 'ready'
-          ? 'Local AI model ready'
-          : status.phase === 'enriching'
-            ? 'Enriching movie details'
-            : 'Local AI issue';
+    ? 'Local Ollama queued'
+    : status.phase === 'connecting'
+      ? 'Connecting to local Ollama'
+      : status.phase === 'enriching'
+        ? 'Enriching movie details with Ollama'
+        : 'Local Ollama issue';
 
   return (
     <aside
@@ -46,18 +42,6 @@ export default function ModelStatusBanner() {
             {label}{status.queuedJobs > 1 ? ` · ${status.queuedJobs} movies queued` : ''}
           </p>
           <p className="mt-0.5 break-words text-xs text-indigo-800 dark:text-indigo-200">{status.message}</p>
-          {status.phase === 'downloading' && status.progress !== null && (
-            <div
-              className="mt-2 h-1.5 overflow-hidden rounded-full bg-indigo-200 dark:bg-indigo-900"
-              role="progressbar"
-              aria-label="Local AI model download progress"
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={status.progress}
-            >
-              <div className="h-full rounded-full bg-indigo-600 transition-[width] dark:bg-indigo-300" style={{ width: `${status.progress}%` }} />
-            </div>
-          )}
         </div>
         {status.phase === 'error' && (
           <button

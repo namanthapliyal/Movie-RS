@@ -134,7 +134,7 @@ test('arbitrary title gets a temporary tile and is removed after failed lookup a
   await expect(page.locator('.movie-card').filter({ hasText: 'Imaginary Untitled' })).toHaveCount(0);
 });
 
-test('local AI status stays global while movie enrichments wait in the worker queue', async ({ page }) => {
+test('Ollama status stays global while movie enrichments wait in the request queue', async ({ page }) => {
   await page.route('**/api/tmdb?action=search**', route => route.fulfill({
     status: 200,
     contentType: 'application/json',
@@ -171,32 +171,30 @@ test('local AI status stays global while movie enrichments wait in the worker qu
       }),
     });
   });
-  await page.route('**/movie-enrichment-worker.js', route => route.fulfill({
-    status: 200,
-    contentType: 'application/javascript',
-    body: `
-      let queue = Promise.resolve();
-      let modelLoaded = false;
-      self.addEventListener('message', ({ data }) => {
-        if (data.type !== 'ENRICH_MOVIE') return;
-        queue = queue.then(async () => {
-          if (!modelLoaded) {
-            self.postMessage({ type: 'status', requestId: data.requestId, phase: 'loading', message: 'Preparing test model…', progress: null });
-            await new Promise(resolve => setTimeout(resolve, 100));
-            self.postMessage({ type: 'status', requestId: data.requestId, phase: 'downloading', message: 'Downloading local AI model: model_quantized.onnx 64%', progress: 64 });
-            await new Promise(resolve => setTimeout(resolve, 900));
-            modelLoaded = true;
-            self.postMessage({ type: 'status', requestId: data.requestId, phase: 'ready', message: 'Model is loaded and ready on this device.', progress: null });
-          }
-          self.postMessage({ type: 'status', requestId: data.requestId, phase: 'enriching', message: 'Enriching movie locally…', progress: null });
-          await new Promise(resolve => setTimeout(resolve, 150));
-          self.postMessage({ type: 'result', requestId: data.requestId, movie: data.movie });
-        });
-      });
-    `,
-  }));
+  const ollamaRequests: Array<{ movie: { title: string; synopsis: string } }> = [];
+  let activeRequests = 0;
+  let maxActiveRequests = 0;
+  await page.route('**/api/local-ai/enrich', async route => {
+    const body = route.request().postDataJSON() as { movie: { title: string; synopsis: string } };
+    ollamaRequests.push(body);
+    activeRequests += 1;
+    maxActiveRequests = Math.max(maxActiveRequests, activeRequests);
+    await new Promise(resolve => setTimeout(resolve, 1200));
+    activeRequests -= 1;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        model: 'qwen2.5-coder:1.5b',
+        enrichment: { synopsis: body.movie.synopsis, genres: ['Drama'], cast: [] },
+      }),
+    });
+  });
 
   await page.goto('/');
+  await page.getByRole('button', { name: 'Open navigation menu' }).click();
+  await page.getByRole('checkbox', { name: 'Enable diagnostics logging' }).check();
+  await page.getByRole('button', { name: 'Open navigation menu' }).click();
 
   async function addMovie(title: string) {
     await page.getByRole('button', { name: 'Add Movie' }).click();
@@ -206,17 +204,256 @@ test('local AI status stays global while movie enrichments wait in the worker qu
 
   await addMovie('First Film');
   const globalStatus = page.getByLabel('Local AI model status');
-  await expect(globalStatus.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '64');
-  await expect(globalStatus).toContainText('model_quantized.onnx');
+  await expect(globalStatus).toContainText('Sending sourced movie facts to local Ollama');
   const firstCard = page.locator('.movie-card').filter({ hasText: 'First Film' });
-  await expect(firstCard.getByRole('status')).toContainText('Waiting for local AI enrichment');
-  await expect(firstCard).not.toContainText('model_quantized.onnx');
+  await expect(firstCard.getByRole('status')).toContainText('Enriching movie details with local Ollama');
 
   await addMovie('Second Film');
   await expect(globalStatus).toContainText('2 movies queued');
+
   await expect(page.locator('.movie-card').filter({ hasText: 'First Film' })).toContainText('First Film synopsis.');
   await expect(page.locator('.movie-card').filter({ hasText: 'Second Film' })).toContainText('Second Film synopsis.');
+  expect(ollamaRequests.map(request => request.movie.title)).toEqual(['First Film', 'Second Film']);
+  expect(maxActiveRequests).toBe(1);
   await expect(globalStatus).toHaveCount(0);
+});
+
+test('unavailable local Ollama keeps verified metadata and explains how to start it', async ({ page }) => {
+  await page.route('**/api/tmdb?action=search**', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ data: { page: 1, results: [], total_pages: 1, total_results: 0 } }),
+  }));
+  await page.route('**/api/movie-lookup', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      candidates: [{
+        id: -702,
+        title: 'Ollama Fallback Film',
+        original_title: 'Ollama Fallback Film',
+        overview: 'Verified source synopsis.',
+        poster_path: null,
+        backdrop_path: null,
+        release_date: '2024-01-01',
+        vote_average: 0,
+        vote_count: 0,
+        genre_ids: [],
+        genres: [],
+        runtime: null,
+        adult: false,
+        original_language: 'en',
+        popularity: 0,
+        metadata_source: 'wikimedia',
+        credits: { cast: [], crew: [] },
+        keywords: { keywords: [] },
+        videos: { results: [] },
+      }],
+    }),
+  }));
+  await page.route('**/api/local-ai/enrich', route => route.fulfill({
+    status: 503,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      error: 'Cannot connect to Ollama at http://127.0.0.1:11434. Start Ollama and ensure model "qwen2.5-coder:1.5b" is installed.',
+    }),
+  }));
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Add Movie' }).click();
+  await page.getByRole('combobox', { name: 'Search for a movie' }).fill('Ollama Fallback Film');
+  await page.getByRole('button', { name: 'Add to Watchlist' }).click();
+
+  const card = page.locator('.movie-card').filter({ hasText: 'Ollama Fallback Film' });
+  await expect(card).toContainText('Verified source synopsis.');
+  await expect(card.getByRole('status')).toHaveCount(0);
+  await expect(page.getByRole('alertdialog')).toHaveCount(0);
+  await expect(page.getByRole('alert').filter({ hasText: 'Cannot connect to Ollama' })).toHaveCount(1);
+  await expect(page.getByLabel('Local AI model status')).toContainText('Cannot connect to Ollama');
+});
+
+test('Dhoom Wikimedia lookup logs request/response and completes enrichment from Wikidata-backed data', async ({ page }) => {
+  let lookupRequest: { method: string; url: string; body: unknown } | undefined;
+  await page.route('**/api/tmdb?action=search**', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ data: { page: 1, results: [], total_pages: 1, total_results: 0 } }),
+  }));
+  await page.route('**/api/movie-lookup', async route => {
+    lookupRequest = {
+      method: route.request().method(),
+      url: route.request().url(),
+      body: route.request().postDataJSON(),
+    };
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        source: 'wikimedia',
+        candidates: [{
+          id: -12345,
+          title: 'Dhoom',
+          original_title: 'Dhoom',
+          overview: 'Dhoom is a 2004 Indian Hindi-language action thriller film.',
+          poster_path: null,
+          backdrop_path: null,
+          release_date: '2004-01-01',
+          vote_average: 0,
+          vote_count: 0,
+          genre_ids: [1],
+          genres: [{ id: 1, name: 'action film' }],
+          runtime: 129,
+          adult: false,
+          original_language: 'en',
+          popularity: 0,
+          metadata_source: 'wikimedia',
+          metadata_sources: [
+            { name: 'Wikipedia', url: 'https://en.wikipedia.org/?curid=12345' },
+            { name: 'Wikidata', url: 'https://www.wikidata.org/wiki/Q12345' },
+          ],
+          credits: {
+            cast: [{ id: 1, name: 'Example Actor', character: '', gender: 0, order: 0, profile_path: null }],
+            crew: [{ id: 1, name: 'Example Director', job: 'Director', department: 'Directing', gender: 0, profile_path: null }],
+          },
+          keywords: { keywords: [] },
+          videos: { results: [] },
+        }],
+      }),
+    });
+  });
+  let ollamaRequest: { movie: { title: string; year: string; synopsis: string; genres: string[]; cast: string[] } } | undefined;
+  await page.route('**/api/local-ai/enrich', async route => {
+    ollamaRequest = route.request().postDataJSON();
+    await new Promise(resolve => setTimeout(resolve, 500));
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        model: 'qwen2.5-coder:1.5b',
+        enrichment: {
+          synopsis: 'Dhoom is a 2004 Indian Hindi-language action thriller film.',
+          genres: ['action film'],
+          cast: ['Example Actor'],
+        },
+      }),
+    });
+  });
+
+  await page.addInitScript(id => {
+    localStorage.setItem('movie_app_user_id', JSON.stringify(id));
+  }, userId);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open navigation menu' }).click();
+  await page.getByRole('checkbox', { name: 'Enable diagnostics logging' }).check();
+  await page.getByRole('button', { name: 'Open navigation menu' }).click();
+  await page.getByRole('button', { name: 'Add Movie' }).click();
+  await page.getByRole('combobox', { name: 'Search for a movie' }).fill('Dhoom');
+  await page.getByRole('button', { name: 'Add to Watchlist' }).click();
+
+  const globalStatus = page.getByLabel('Local AI model status');
+  await expect(globalStatus).toContainText('Sending sourced movie facts to local Ollama');
+  await page.getByRole('button', { name: 'Open navigation menu' }).click();
+  await page.getByText(/Recent diagnostics/).click();
+  const diagnosticLog = page.getByRole('log');
+  await expect(diagnosticLog).toContainText('Movie metadata request: POST /api/movie-lookup; body: { query }.');
+  await expect(diagnosticLog).toContainText('Movie metadata response: HTTP 200; source=wikimedia; candidates=1.');
+  await expect(diagnosticLog).toContainText('Selected metadata candidate source=wikimedia.');
+  await expect(diagnosticLog).toContainText('Movie lookup: Enriching movie details with local Ollama…');
+
+  expect(lookupRequest).toEqual({
+    method: 'POST',
+    url: expect.stringContaining('/api/movie-lookup'),
+    body: { query: 'Dhoom' },
+  });
+  expect(ollamaRequest).toEqual({
+    movie: {
+      title: 'Dhoom',
+      year: '2004',
+      synopsis: 'Dhoom is a 2004 Indian Hindi-language action thriller film.',
+      genres: ['action film'],
+      cast: ['Example Actor'],
+    },
+  });
+
+  const movieCard = page.locator('.movie-card').filter({ hasText: 'Dhoom' });
+  await expect(movieCard).toContainText('Dhoom is a 2004 Indian Hindi-language action thriller film.');
+  await expect(movieCard.getByRole('status')).toHaveCount(0);
+  const savedEntry = await page.evaluate((key) => {
+    const entries = JSON.parse(localStorage.getItem(key) || '[]');
+    return entries.find((entry: { title: string }) => entry.title === 'Dhoom');
+  }, `movie_app_watchlist_${userId}`);
+  expect(savedEntry).toMatchObject({
+    title: 'Dhoom',
+    runtime: 129,
+    lookup_status: 'complete',
+    genres: ['action film'],
+    cast: ['Example Actor'],
+    directors: ['Example Director'],
+    metadata_sources: [
+      { name: 'Wikipedia', url: 'https://en.wikipedia.org/?curid=12345' },
+      { name: 'Wikidata', url: 'https://www.wikidata.org/wiki/Q12345' },
+    ],
+  });
+});
+
+test('Ollama response errors keep source metadata and remain visible', async ({ page }) => {
+  await page.route('**/api/tmdb?action=search**', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ data: { page: 1, results: [], total_pages: 1, total_results: 0 } }),
+  }));
+  await page.route('**/api/movie-lookup', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      source: 'wikimedia',
+      candidates: [{
+        id: -445,
+        title: 'Ollama Failure Film',
+        original_title: 'Ollama Failure Film',
+        overview: 'A sourced movie overview.',
+        poster_path: null,
+        backdrop_path: null,
+        release_date: '2024-01-01',
+        vote_average: 0,
+        vote_count: 0,
+        genre_ids: [],
+        genres: [],
+        runtime: null,
+        adult: false,
+        original_language: 'en',
+        popularity: 0,
+        metadata_source: 'wikimedia',
+        credits: { cast: [], crew: [] },
+        keywords: { keywords: [] },
+        videos: { results: [] },
+      }],
+    }),
+  }));
+  await page.route('**/api/local-ai/enrich', route => route.fulfill({
+    status: 502,
+    contentType: 'application/json',
+    body: JSON.stringify({ error: 'Ollama did not return the required JSON fields.' }),
+  }));
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open navigation menu' }).click();
+  await page.getByRole('checkbox', { name: 'Enable diagnostics logging' }).check();
+  await page.getByRole('button', { name: 'Open navigation menu' }).click();
+  await page.getByRole('button', { name: 'Add Movie' }).click();
+  await page.getByRole('combobox', { name: 'Search for a movie' }).fill('Ollama Failure Film');
+  await page.getByRole('button', { name: 'Add to Watchlist' }).click();
+
+  const globalStatus = page.getByLabel('Local AI model status');
+  await expect(globalStatus).toContainText('Ollama did not return the required JSON fields.');
+  await expect(page.locator('.movie-card').filter({ hasText: 'Ollama Failure Film' })).toContainText('A sourced movie overview.');
+  await expect(page.getByRole('alertdialog')).toHaveCount(0);
+  await expect(page.getByRole('alert').filter({ hasText: 'Ollama did not return the required JSON fields.' })).toHaveCount(1);
+  await page.getByRole('button', { name: 'Open navigation menu' }).click();
+  await page.getByText(/Recent diagnostics/).click();
+  await expect(page.getByRole('log')).toContainText(
+    'Local Ollama enrichment failed: Ollama did not return the required JSON fields.'
+  );
 });
 
 test('navigation exposes explorer, recommendations, and formula without formula on the watchlist', async ({ page }) => {

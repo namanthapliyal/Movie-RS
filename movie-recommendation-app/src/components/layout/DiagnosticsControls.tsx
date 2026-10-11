@@ -35,9 +35,12 @@ export default function DiagnosticsControls() {
       </label>
       <details className="mt-2">
         <summary className="cursor-pointer text-xs text-muted-foreground">
-          Recent diagnostics ({records.length})
+          Recent diagnostics ({records.length}{records.length === 100 ? ' · latest 100' : ''})
         </summary>
-        <div className="mt-2 max-h-40 space-y-1 overflow-y-auto text-xs" aria-live="polite">
+        <div className="mt-2 max-h-40 space-y-1 overflow-y-auto text-xs" role="log" aria-live="polite" aria-relevant="additions text">
+          {records.length === 100 && (
+            <p className="text-muted-foreground">Showing the latest 100 entries; older entries roll off.</p>
+          )}
           {records.length ? records.slice().reverse().map((record, index) => (
             <p key={`${record.timestamp}-${index}`}>
               {new Date(record.timestamp).toLocaleTimeString()} [{record.level}] {record.message}

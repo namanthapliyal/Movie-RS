@@ -112,29 +112,51 @@ export default function Dashboard() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query }),
       });
-      const result = await response.json() as { candidates?: TMDBMovieDetails[]; error?: string };
+      appLogger.info('Movie metadata request: POST /api/movie-lookup; body: { query }.');
+      const result = await response.json() as {
+        candidates?: TMDBMovieDetails[];
+        error?: string;
+        source?: 'tmdb' | 'wikimedia';
+      };
+      appLogger.info(
+        `Movie metadata response: HTTP ${response.status}; source=${result.source ?? 'unknown'}; candidates=${result.candidates?.length ?? 0}.`
+      );
       if (!response.ok) throw new Error(result.error || `Lookup failed (${response.status})`);
       const candidate = chooseMatchingCandidate(query, result.candidates ?? []);
       if (!candidate) throw new Error('not-found');
 
-      updateLookupProgress(entry.id, 'downloading', 'Waiting for the local AI model…');
+      appLogger.info(`Selected metadata candidate source=${candidate.metadata_source ?? result.source ?? 'unknown'}.`);
+      updateLookupProgress(entry.id, 'downloading', 'Waiting for local Ollama enrichment…');
+      let localAiError: string | null = null;
       const enrichedMovie = await enrichMovieLocally(candidate, () => {
         updateLookupProgress(
           entry.id,
           'downloading',
-          'Waiting for the local AI model…'
+          'Waiting for local Ollama enrichment…'
         );
       }, () => {
-        updateLookupProgress(entry.id, 'processing', 'Enriching movie details locally…');
+        updateLookupProgress(entry.id, 'processing', 'Enriching movie details with local Ollama…');
+      }).catch(error => {
+        localAiError = error instanceof Error ? error.message : 'Unknown local Ollama error.';
+        appLogger.warn(`Local Ollama enrichment failed; saving verified source metadata instead: ${localAiError}`);
+        return candidate;
       });
       const updatedMovie = DBService.updateMovieMetadata(entry.id, enrichedMovie);
       if (updatedMovie) {
         updateWatchlistEntry(updatedMovie);
-        toast({ title: 'Movie details found', description: `${updatedMovie.title} was enriched from local sources.` });
+        toast({
+          title: 'Movie details found',
+          description: localAiError
+            ? `${updatedMovie.title} was saved from its source, but local Ollama enrichment failed: ${localAiError}`
+            : `${updatedMovie.title} was enriched by local Ollama.`,
+        });
       }
     } catch (error) {
       const notFound = error instanceof Error && error.message === 'not-found';
-      if (!notFound) appLogger.error('Fallback movie lookup failed.');
+      if (!notFound) {
+        const detail = error instanceof Error ? error.message : 'Unknown lookup or enrichment error.';
+        appLogger.error(`Fallback movie lookup or enrichment failed: ${detail}`);
+      }
       const message = notFound
         ? `“${query}” was not found in the movie database. Click OK to remove its temporary tile.`
         : `Movie details for “${query}” could not be verified. Click OK to remove its temporary tile.`;
