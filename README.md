@@ -1,6 +1,8 @@
-# Movie Recommendation App
+# Movie-RS
 
-This repository contains the Movie Recommendation App in [`movie-recommendation-app`](./movie-recommendation-app/). The app is built with Next.js, TypeScript, and Tailwind CSS.
+**Public movie recommendation system** by [@namanthapliyal](https://github.com/namanthapliyal).
+
+This repository contains the Movie-RS application in [`movie-recommendation-app`](./movie-recommendation-app/), built with Next.js, TypeScript, and Tailwind CSS.
 
 Run the commands below from the `movie-recommendation-app` directory unless a command says otherwise.
 

@@ -1,4 +1,4 @@
-# Personalized Movie Recommendation System
+# Movie-RS — Public Movie Recommendation System
 
 A Gen AI-powered movie recommendation application that learns your taste through reviews and ratings, continuously adapting its recommendation algorithm to provide personalized movie suggestions.
 
