@@ -1,0 +1,30 @@
+# Dependencies
+/node_modules/
+/movie-recommendation-app/node_modules/
+
+# Next.js build output
+/movie-recommendation-app/.next/
+/movie-recommendation-app/out/
+/movie-recommendation-app/build/
+/movie-recommendation-app/.vercel/
+
+# Local environment files; keep the example template versioned
+/movie-recommendation-app/.env*
+!/movie-recommendation-app/.env.example
+
+# Test output and coverage
+/movie-recommendation-app/test-results/
+/movie-recommendation-app/playwright-report/
+/movie-recommendation-app/blob-report/
+/movie-recommendation-app/coverage/
+
+# TypeScript and runtime logs
+/movie-recommendation-app/*.tsbuildinfo
+/movie-recommendation-app/*.log
+
+# Locally generated Graphify reports and graph data
+/movie-recommendation-app/graphify-out/
+
+# OS metadata
+Thumbs.db
+.DS_Store
